@@ -29,6 +29,7 @@ import (
 
 	"github.com/mandiant/gopacket/internal/build"
 	"github.com/mandiant/gopacket/pkg/kerberos"
+	"github.com/mandiant/gopacket/pkg/security"
 	"github.com/mandiant/gopacket/pkg/session"
 	"github.com/mandiant/gopacket/pkg/third_party/smb2"
 	"github.com/mandiant/gopacket/pkg/transport"
@@ -231,6 +232,18 @@ func (c *Client) Ls(dir string) ([]os.FileInfo, error) {
 	}
 	p := path.Join(c.currentPath, dir)
 	return c.currentShare.ReadDir(p)
+}
+
+func (c *Client) QuerySecurityDescriptor(name string, flags uint32) (*security.SecurityDescriptor, error) {
+	if c.currentShare == nil {
+		return nil, fmt.Errorf("no share selected")
+	}
+	p := path.Join(c.currentPath, name)
+	raw, err := c.currentShare.QuerySecurityInfo(p, smb2.SecurityInformation(flags))
+	if err != nil {
+		return nil, err
+	}
+	return security.ParseSecurityDescriptor(raw)
 }
 
 func (c *Client) Cd(dir string) error {
