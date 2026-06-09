@@ -91,6 +91,24 @@ func (c *Session) Logoff() error {
 	return c.s.logoff(c.ctx)
 }
 
+// Echo sends an SMB2 ECHO request on the current SMB session.
+func (c *Session) Echo() error {
+	req := new(EchoRequest)
+	req.CreditCharge = 1
+
+	res, err := c.s.sendRecv(SMB2_ECHO, req, c.ctx)
+	if err != nil {
+		return err
+	}
+
+	r := EchoResponseDecoder(res)
+	if r.IsInvalid() {
+		return &InvalidResponseError{"broken echo response format"}
+	}
+
+	return nil
+}
+
 // Mount mounts the SMB share.
 // sharename must follow format like `<share>` or `\\<server>\<share>`.
 // Note that the mounted share doesn't inherit session's context.
