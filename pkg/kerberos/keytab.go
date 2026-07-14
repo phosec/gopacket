@@ -89,8 +89,8 @@ func buildKeytabEntry(username, realm string, keyValue []byte) []byte {
 	// Timestamp (uint32) - Unix timestamp
 	binary.Write(&buf, binary.BigEndian, uint32(time.Now().Unix()))
 
-	// KVNO (uint8)
-	buf.WriteByte(1)
+	// KVNO zero marks a raw key whose directory key version is unknown.
+	buf.WriteByte(0)
 
 	// Key type (int16) - RC4_HMAC = 23
 	binary.Write(&buf, binary.BigEndian, int16(etypeID.RC4_HMAC))

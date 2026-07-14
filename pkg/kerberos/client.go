@@ -31,6 +31,7 @@ import (
 	"github.com/mandiant/gopacket/pkg/third_party/gokrb5/config"
 	"github.com/mandiant/gopacket/pkg/third_party/gokrb5/credentials"
 	"github.com/mandiant/gopacket/pkg/third_party/gokrb5/gssapi"
+	"github.com/mandiant/gopacket/pkg/third_party/gokrb5/iana/etypeID"
 	"github.com/mandiant/gopacket/pkg/third_party/gokrb5/keytab"
 	"github.com/mandiant/gopacket/pkg/third_party/gokrb5/messages"
 	"github.com/mandiant/gopacket/pkg/third_party/gokrb5/types"
@@ -149,6 +150,50 @@ type Client struct {
 	cfg       *config.Config
 	realm     string
 	username  string
+}
+
+// NewClientWithNTHash creates a Kerberos client that authenticates with the
+// supplied NT hash as an RC4-HMAC key. Unlike NewClientFromSession, it never
+// consults KRB5CCNAME or a working-directory cache: an explicitly selected
+// pass-the-hash flow must not silently use another principal's tickets.
+func NewClientWithNTHash(creds *session.Credentials, target session.Target, dcIP string) (*Client, error) {
+	realm := strings.ToUpper(strings.TrimSpace(creds.Domain))
+	if realm == "" {
+		return nil, fmt.Errorf("domain/realm is required for Kerberos")
+	}
+	if strings.TrimSpace(creds.Username) == "" {
+		return nil, fmt.Errorf("username is required for Kerberos")
+	}
+
+	hash := strings.TrimSpace(creds.Hash)
+	if parts := strings.SplitN(hash, ":", 2); len(parts) == 2 {
+		hash = parts[1]
+	}
+	kt, err := BuildKeytabFromNTHash(creds.Username, realm, hash)
+	if err != nil {
+		return nil, err
+	}
+
+	kdc := strings.TrimSpace(dcIP)
+	if kdc == "" {
+		kdc = target.Host
+	}
+	cfg, err := config.NewFromString(SynthesizeKrb5Config(realm, kdc))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create krb5 config: %v", err)
+	}
+	// An NT hash is only an RC4-HMAC key. Restrict the AS-REQ to that enctype
+	// so the KDC does not select an AES pre-authentication key that cannot
+	// exist in this single-key keytab.
+	cfg.LibDefaults.DefaultTktEnctypes = []string{"arcfour-hmac-md5"}
+	cfg.LibDefaults.DefaultTktEnctypeIDs = []int32{etypeID.RC4_HMAC}
+
+	return &Client{
+		KrbClient: client.NewWithKeytab(TransportKDCDialer{}, creds.Username, realm, kt, cfg, client.DisablePAFXFAST(true)),
+		cfg:       cfg,
+		realm:     realm,
+		username:  creds.Username,
+	}, nil
 }
 
 func NewClientFromSession(creds *session.Credentials, target session.Target, dcIP string) (*Client, error) {
@@ -373,6 +418,53 @@ func (c *Client) GenerateAPReqFull(spn string) ([]byte, types.EncryptionKey, err
 	}
 
 	return b, key, nil
+}
+
+// GenerateSASLGSSAPReq returns an AP-REQ suitable for an RFC 4752 SASL GSSAPI
+// bind. SASL requires a valid RFC 4121 checksum and mutual authentication;
+// the generic SMB AP-REQ path intentionally preserves its existing flags.
+func (c *Client) GenerateSASLGSSAPReq(spn string) ([]byte, types.EncryptionKey, error) {
+	var tkt *messages.Ticket
+	var key types.EncryptionKey
+
+	if cachedTkt, cachedKey, found := c.getServiceTicketFromCCache(spn); found {
+		tkt = cachedTkt
+		key = cachedKey
+	} else if c.KrbClient != nil {
+		if err := c.KrbClient.Login(); err != nil {
+			return nil, types.EncryptionKey{}, fmt.Errorf("login failed: %v", err)
+		}
+		ticket, sessionKey, err := c.KrbClient.GetServiceTicket(spn)
+		if err != nil {
+			return nil, types.EncryptionKey{}, fmt.Errorf("failed to get service ticket: %v", err)
+		}
+		tkt = &ticket
+		key = sessionKey
+	} else {
+		return nil, types.EncryptionKey{}, fmt.Errorf("no TGT available and no cached service ticket for %s", spn)
+	}
+
+	cname := types.PrincipalName{NameType: 1, NameString: []string{c.username}}
+	auth, err := types.NewAuthenticator(c.realm, cname)
+	if err != nil {
+		return nil, types.EncryptionKey{}, fmt.Errorf("failed to create authenticator: %v", err)
+	}
+	contextFlags := gssapi.ContextFlagMutual | gssapi.ContextFlagConf | gssapi.ContextFlagInteg
+	auth.Cksum = types.Checksum{
+		CksumType: 0x8003,
+		Checksum:  buildGSSAPIChecksum(16, nil, contextFlags),
+	}
+
+	apReq, err := messages.NewAPReq(*tkt, key, auth)
+	if err != nil {
+		return nil, types.EncryptionKey{}, fmt.Errorf("failed to create AP-REQ: %v", err)
+	}
+	types.SetFlag(&apReq.APOptions, gssapi.ContextFlagMutual)
+	encoded, err := apReq.Marshal()
+	if err != nil {
+		return nil, types.EncryptionKey{}, err
+	}
+	return encoded, key, nil
 }
 
 // WrapInSPNEGO wraps a raw GSSAPI KRB5 token in SPNEGO NegTokenInit format.

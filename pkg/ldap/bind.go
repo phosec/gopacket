@@ -51,53 +51,57 @@ func (c *Client) LoginWithKerberos() error {
 		return fmt.Errorf("connection not established")
 	}
 
-	// Create Kerberos client from session credentials (uses ccache)
 	krbClient, err := kerberos.NewClientFromSession(c.Session, c.Target, c.Session.DCIP)
 	if err != nil {
 		return fmt.Errorf("failed to create kerberos client: %v", err)
 	}
+	return c.loginWithKerberosClient(krbClient)
+}
 
-	// Create GSSAPI client wrapper
+func (c *Client) loginWithKerberosClient(krbClient *kerberos.Client) error {
 	gssClient := NewKerberosGSSAPIClient(krbClient)
-
-	// Build SPN for LDAP service
 	spn := fmt.Sprintf("ldap/%s", c.Target.Host)
-
-	// Perform GSSAPI bind
-	err = c.Conn.GSSAPIBind(gssClient, spn, "")
-	if err != nil {
+	if err := c.Conn.GSSAPIBind(gssClient, spn, ""); err != nil {
 		return fmt.Errorf("GSSAPI bind failed: %v", err)
 	}
-
 	return nil
 }
 
-// LoginWithHash attempts to bind using NTLM hash authentication.
+// LoginWithHash first uses the NT hash as a Kerberos RC4-HMAC key for a
+// standards-based GSSAPI SASL bind. This works with Samba AD, which advertises
+// SASL NTLM but does not implement Microsoft's LDAP Sicily bind exchange.
+// Microsoft AD can still use the existing Sicily path when Kerberos is
+// unavailable.
 func (c *Client) LoginWithHash() error {
 	if c.Conn == nil {
 		return fmt.Errorf("connection not established")
 	}
 
-	// Parse the hash - format is LMHASH:NTHASH
-	hash := c.Session.Hash
-	if strings.Contains(hash, ":") {
-		parts := strings.Split(hash, ":")
-		if len(parts) == 2 {
-			// Use NT hash (second part)
-			hash = parts[1]
+	var kerberosErr error
+	if c.Session.Domain != "" {
+		krbClient, err := kerberos.NewClientWithNTHash(c.Session, c.Target, c.Session.DCIP)
+		if err == nil {
+			if err = c.loginWithKerberosClient(krbClient); err == nil {
+				return nil
+			}
 		}
+		kerberosErr = err
 	}
 
+	hash := c.Session.Hash
+	if parts := strings.SplitN(hash, ":", 2); len(parts) == 2 {
+		hash = parts[1]
+	}
 	domain := c.Session.Domain
 	if domain == "" {
 		domain = "WORKGROUP"
 	}
-
-	err := c.Conn.NTLMBindWithHash(domain, c.Session.Username, hash)
-	if err != nil {
+	if err := c.Conn.NTLMBindWithHash(domain, c.Session.Username, hash); err != nil {
+		if kerberosErr != nil {
+			return fmt.Errorf("Kerberos hash bind failed: %v; NTLM bind failed: %v", kerberosErr, err)
+		}
 		return fmt.Errorf("NTLM bind failed: %v", err)
 	}
-
 	return nil
 }
 

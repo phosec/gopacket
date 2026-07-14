@@ -68,7 +68,7 @@ func New() *Keytab {
 }
 
 // GetEncryptionKey returns the EncryptionKey from the Keytab for the newest entry with the required kvno, etype and matching principal.
-// If the kvno is zero then the latest kvno will be returned. The kvno is also returned for
+// A requested kvno of zero selects the latest entry. An entry kvno of zero is an unversioned key and matches any requested kvno.
 func (kt *Keytab) GetEncryptionKey(princName types.PrincipalName, realm string, kvno int, etype int32) (types.EncryptionKey, int, error) {
 	var key types.EncryptionKey
 	var t time.Time
@@ -76,7 +76,7 @@ func (kt *Keytab) GetEncryptionKey(princName types.PrincipalName, realm string, 
 	for _, k := range kt.Entries {
 		if k.Principal.Realm == realm && len(k.Principal.Components) == len(princName.NameString) &&
 			k.Key.KeyType == etype &&
-			(k.KVNO == uint32(kvno) || kvno == 0) &&
+			(k.KVNO == uint32(kvno) || kvno == 0 || k.KVNO == 0) &&
 			k.Timestamp.After(t) {
 			p := true
 			for i, n := range k.Principal.Components {
