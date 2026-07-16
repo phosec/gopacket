@@ -37,12 +37,20 @@ func (c *Client) Login() error {
 		return c.LoginWithHash()
 	}
 
-	// Use password auth
-	bindUser := c.Session.Username
-	if c.Session.Domain != "" {
-		bindUser = fmt.Sprintf("%s\\%s", c.Session.Domain, c.Session.Username)
+	// Use password auth.
+	return c.LoginWithUser(passwordBindUsername(c.Session.Domain, c.Session.Username))
+}
+
+func passwordBindUsername(domain, username string) string {
+	domain = strings.TrimSpace(domain)
+	username = strings.TrimSpace(username)
+	if domain == "" || strings.ContainsAny(username, `\@`) {
+		return username
 	}
-	return c.LoginWithUser(bindUser)
+	if strings.Contains(domain, ".") {
+		return username + "@" + domain
+	}
+	return domain + `\` + username
 }
 
 // LoginWithKerberos performs Kerberos GSSAPI SASL bind.
